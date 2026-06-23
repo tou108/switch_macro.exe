@@ -116,7 +116,8 @@ jobs:
             Write-Host "Added LineNotifyToken to NxCommand"
           }
           $asm.Write("libs/NxInterface_patched.dll")
-          Move-Item "libs/NxInterface_patched.dll" "libs/NxInterface.dll" -Force
+          Remove-Item "libs/NxInterface.dll" -Force
+          Move-Item "libs/NxInterface_patched.dll" "libs/NxInterface.dll"
           Write-Host "NxInterface.dll patched"
 
       # ── System.Index/Range polyfill (CS0518対策) ──────────────────
