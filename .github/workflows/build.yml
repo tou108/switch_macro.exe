@@ -116,6 +116,9 @@ jobs:
             Write-Host "Added LineNotifyToken to NxCommand"
           }
           $asm.Write("libs/NxInterface_patched.dll")
+          $asm.Dispose()
+          [GC]::Collect()
+          Start-Sleep -Milliseconds 200
           Remove-Item "libs/NxInterface.dll" -Force
           Move-Item "libs/NxInterface_patched.dll" "libs/NxInterface.dll"
           Write-Host "NxInterface.dll patched"
