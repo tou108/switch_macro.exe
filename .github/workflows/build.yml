@@ -230,14 +230,57 @@ jobs:
           }
           Write-Host "Build succeeded: $($exe.FullName) ($([math]::Round($exe.Length/1KB, 1)) KB)"
 
+      # ── Add OpenCvSharpExtern.dll (ネイティブバインディング) ──────
+      - name: Add OpenCvSharpExtern.dll to output
+        shell: pwsh
+        run: |
+          # libs/OpenCvSharp.dll の SHA256 でバージョンを自動判定して一致する
+          # OpenCvSharpExtern.dll を bin\Release\ へコピーする
+          $targetHash = "38ef66b5af604afedbaa9503a126706754dddcee3c54db270e40cbac3423e742"
+          $candidates = @(
+            "4.9.0.20240103",
+            "4.8.0.20230708",
+            "4.7.0.20230115",
+            "4.6.0.20221208",
+            "4.10.0.20241024",
+            "4.5.5.4799"
+          )
+          $found = $false
+          foreach ($ver in $candidates) {
+            Write-Host "Trying OpenCvSharp4 $ver ..."
+            nuget install OpenCvSharp4 -Version $ver -OutputDirectory packages_ocv -NonInteractive 2>&1 | Out-Null
+            $dll = Get-ChildItem packages_ocv -Filter "OpenCvSharp.dll" -Recurse |
+              Where-Object { $_.FullName -notmatch "ref[\\/]" } |
+              Select-Object -First 1
+            if ($dll) {
+              $hash = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLower()
+              Write-Host "  hash=$hash"
+              if ($hash -eq $targetHash) {
+                Write-Host "  -> Matched! Downloading runtime..."
+                nuget install OpenCvSharp4.runtime.win -Version $ver `
+                  -OutputDirectory packages_ocv -NonInteractive
+                $extern = Get-ChildItem packages_ocv -Filter "OpenCvSharpExtern.dll" -Recurse |
+                  Select-Object -First 1
+                if ($extern) {
+                  Copy-Item $extern.FullName "bin\Release\OpenCvSharpExtern.dll" -Force
+                  Write-Host "OpenCvSharpExtern.dll ($ver) copied to bin\Release\"
+                  $found = $true
+                  break
+                }
+              }
+            }
+          }
+          if (-not $found) {
+            Write-Error "OpenCvSharp のバージョンが特定できませんでした。libs/OpenCvSharpExtern.dll を手動で追加してください。"
+            exit 1
+          }
+
       # ── Upload artifact ────────────────────────────────────────────
       - name: Upload Switch_macro.exe
         uses: actions/upload-artifact@v4
         with:
           name: Switch_macro-${{ github.sha }}
-          path: |
-            bin/Release/Switch_macro.exe
-            libs/
+          path: bin/Release/
           retention-days: 30
 
       # ── Create release on tag push ─────────────────────────────────
