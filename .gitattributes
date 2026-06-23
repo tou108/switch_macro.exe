@@ -1,2 +1,3 @@
 *.resx filter=lfs diff=lfs merge=lfs -text
 libs/*.dll filter=lfs diff=lfs merge=lfs -text
+libs/OpenCvSharpExtern.dll filter=lfs diff=lfs merge=lfs -text
