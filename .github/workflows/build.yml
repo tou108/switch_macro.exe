@@ -97,8 +97,13 @@ jobs:
           & $ildasm "libs\NxInterface.dll" /out:NxInterface.il /nobar
           if (-not (Test-Path NxInterface.il)) { Write-Error "Disassembly failed"; exit 1 }
           $il = Get-Content NxInterface.il -Raw -Encoding UTF8
+          # WinRT extern参照を除去（ilasm非対応）
+          $il = [regex]::Replace($il, '\.assembly extern windowsruntime \S+\s*\{[^}]*\}', '', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+          # NxControllerInterface を public に
           $il = $il -replace '(\.class\s+)private(\s+auto\s+ansi\s+.*?NxControllerInterface)', '$1public$2'
+          # NxCommand を public に
           $il = $il -replace '(\.class\s+)private(\s+auto\s+ansi\s+.*?\bNxCommand\b)', '$1public$2'
+          # LineNotifyToken フィールドを追加
           if ($il -notmatch 'LineNotifyToken') {
             $il = $il -replace '(} // end of class NxCommand)', "  .field public static string LineNotifyToken`n  `$1"
             Write-Host "Added LineNotifyToken to NxCommand"
