@@ -84,6 +84,29 @@ jobs:
             Write-Host "Microsoft.Dynamic.dll copied to libs/"
           }
 
+      # ── Patch NxInterface.dll ─────────────────────────────────────
+      # NxControllerInterface を internal→public に変更
+      # NxCommand.LineNotifyToken フィールドを追加
+      - name: Patch NxInterface.dll
+        shell: pwsh
+        run: |
+          $ildasm = Get-ChildItem "C:\Program Files (x86)\Microsoft SDKs" -Filter "ildasm.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -Last 1 -ExpandProperty FullName
+          $ilasm  = Get-ChildItem "C:\Windows\Microsoft.NET" -Filter "ilasm.exe" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "64" } | Select-Object -First 1 -ExpandProperty FullName
+          Write-Host "ildasm: $ildasm"
+          Write-Host "ilasm : $ilasm"
+          & $ildasm "libs\NxInterface.dll" /out:NxInterface.il /nobar
+          if (-not (Test-Path NxInterface.il)) { Write-Error "Disassembly failed"; exit 1 }
+          $il = Get-Content NxInterface.il -Raw -Encoding UTF8
+          $il = $il -replace '(\.class\s+)private(\s+auto\s+ansi\s+.*?NxControllerInterface)', '$1public$2'
+          $il = $il -replace '(\.class\s+)private(\s+auto\s+ansi\s+.*?\bNxCommand\b)', '$1public$2'
+          if ($il -notmatch 'LineNotifyToken') {
+            $il = $il -replace '(} // end of class NxCommand)', "  .field public static string LineNotifyToken`n  `$1"
+            Write-Host "Added LineNotifyToken to NxCommand"
+          }
+          Set-Content NxInterface.il $il -Encoding UTF8
+          & $ilasm "NxInterface.il" /dll /output:"libs\NxInterface.dll" /nologo
+          Write-Host "NxInterface.dll patched"
+
       # ── Fix LangVersion (CS1617対策) ──────────────────────────────
       - name: Fix LangVersion in csproj
         shell: pwsh
