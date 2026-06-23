@@ -84,6 +84,106 @@ jobs:
             Write-Host "Microsoft.Dynamic.dll copied to libs/"
           }
 
+      # ── Download SharpDX core DLL (CS0012対策) ────────────────────
+      - name: Download SharpDX core DLL
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "libs\SharpDX.dll")) {
+            nuget install SharpDX -Version 4.2.0 -OutputDirectory packages -NonInteractive
+            $dll = Get-ChildItem packages -Filter "SharpDX.dll" -Recurse |
+              Where-Object { $_.FullName -match "net45|net40|lib" } |
+              Select-Object -First 1 -ExpandProperty FullName
+            if ($dll) {
+              Copy-Item $dll "libs\SharpDX.dll" -Force
+              Write-Host "SharpDX.dll copied to libs/"
+            } else { Write-Error "SharpDX.dll not found"; exit 1 }
+          } else { Write-Host "SharpDX.dll already exists" }
+
+      # ── Patch NxInterface.dll (internal→public 修正版) ────────────
+      - name: Patch NxInterface.dll
+        shell: pwsh
+        run: |
+          nuget install Mono.Cecil -Version 0.11.5 -OutputDirectory packages -NonInteractive
+          $cecilPath = Get-ChildItem packages -Filter "Mono.Cecil.dll" -Recurse |
+            Where-Object { $_.FullName -notmatch "runtimes|contentFiles" } |
+            Select-Object -First 1 -ExpandProperty FullName
+          Write-Host "Mono.Cecil: $cecilPath"
+          Add-Type -Path $cecilPath
+
+          $asm    = [Mono.Cecil.AssemblyDefinition]::ReadAssembly("libs/NxInterface.dll")
+          $module = $asm.MainModule
+
+          # ネスト型含む全型を収集
+          $allTypes = [System.Collections.Generic.List[object]]::new()
+          foreach ($t in $module.Types) {
+            $allTypes.Add($t)
+            foreach ($nt in $t.NestedTypes) { $allTypes.Add($nt) }
+          }
+          Write-Host "Total types: $($allTypes.Count)"
+
+          foreach ($type in $allTypes) {
+            Write-Host "Checking: $($type.FullName)"
+
+            if ($type.Name -eq "NxControllerInterface" -or $type.Name -eq "NxCommand") {
+
+              # クラス自体を public に
+              if (-not $type.IsPublic) {
+                $type.IsPublic = $true
+                Write-Host "  -> Made $($type.Name) public"
+              }
+
+              # 全フィールドを public に (internal → public)
+              foreach ($field in $type.Fields) {
+                if (-not $field.IsPublic) {
+                  $field.IsPublic = $true
+                  Write-Host "  -> Made field '$($field.Name)' public"
+                }
+              }
+
+              # 全メソッドを public に (コンストラクタ・コンパイラ生成を除く)
+              foreach ($method in $type.Methods) {
+                $skip = $method.Name -eq ".ctor" -or
+                        $method.Name -eq ".cctor" -or
+                        $method.Name.StartsWith("<")
+                if (-not $skip -and -not $method.IsPublic) {
+                  $method.IsPublic = $true
+                  Write-Host "  -> Made method '$($method.Name)' public"
+                }
+              }
+            }
+          }
+
+          $asm.Write("libs/NxInterface_patched.dll")
+          $asm.Dispose()
+          [GC]::Collect()
+          Start-Sleep -Milliseconds 300
+          Remove-Item "libs/NxInterface.dll" -Force
+          Move-Item "libs/NxInterface_patched.dll" "libs/NxInterface.dll"
+          Write-Host "NxInterface.dll patched successfully"
+
+      # ── System.Index/Range polyfill (CS0518対策) ──────────────────
+      - name: Add System.Index polyfill
+        shell: pwsh
+        run: |
+          $p  = "namespace System {`n"
+          $p += "  internal readonly struct Index {`n"
+          $p += "    private readonly int _v;`n"
+          $p += "    public Index(int v, bool fromEnd=false){_v=fromEnd?~v:v;}`n"
+          $p += "    public static implicit operator Index(int v)=>new Index(v);`n"
+          $p += "    public int GetOffset(int len)=>_v<0?len+_v+1:_v;`n"
+          $p += "    public bool IsFromEnd=>_v<0;`n"
+          $p += "    public int Value=>_v<0?~_v:_v;`n"
+          $p += "  }`n"
+          $p += "  internal readonly struct Range {`n"
+          $p += "    public Index Start{get;}`n"
+          $p += "    public Index End{get;}`n"
+          $p += "    public Range(Index s,Index e){Start=s;End=e;}`n"
+          $p += "    public static Range All=>new Range(new Index(0),new Index(~0));`n"
+          $p += "  }`n"
+          $p += "}`n"
+          Set-Content "SystemIndexPolyfill.cs" $p -Encoding UTF8
+          Write-Host "System.Index polyfill created"
+
       # ── Fix LangVersion (CS1617対策) ──────────────────────────────
       - name: Fix LangVersion in csproj
         shell: pwsh
@@ -92,6 +192,20 @@ jobs:
           $content = $content -replace '<LangVersion>[^<]+</LangVersion>', '<LangVersion>preview</LangVersion>'
           Set-Content Switch_macro.csproj $content -Encoding UTF8
           Write-Host "LangVersion -> preview"
+
+      # ── Add WPF references (CS0234対策) ───────────────────────────
+      - name: Add WPF references to csproj
+        shell: pwsh
+        run: |
+          $content = Get-Content Switch_macro.csproj -Raw
+          if ($content -notmatch 'PresentationFramework') {
+            $wpfRefs = '<ItemGroup><Reference Include="PresentationFramework" /><Reference Include="PresentationCore" /><Reference Include="WindowsBase" /><Reference Include="System.Xaml" /></ItemGroup>'
+            $content = $content -replace '</Project>', "$wpfRefs`n</Project>"
+            Set-Content Switch_macro.csproj $content -Encoding UTF8
+            Write-Host "WPF references added"
+          } else {
+            Write-Host "PresentationFramework already referenced"
+          }
 
       # ── Restore & Build ────────────────────────────────────────────
       - name: Restore NuGet packages
@@ -116,14 +230,57 @@ jobs:
           }
           Write-Host "Build succeeded: $($exe.FullName) ($([math]::Round($exe.Length/1KB, 1)) KB)"
 
+      # ── Add OpenCvSharpExtern.dll (ネイティブバインディング) ──────
+      - name: Add OpenCvSharpExtern.dll to output
+        shell: pwsh
+        run: |
+          # libs/OpenCvSharp.dll の SHA256 でバージョンを自動判定して一致する
+          # OpenCvSharpExtern.dll を bin\Release\ へコピーする
+          $targetHash = "38ef66b5af604afedbaa9503a126706754dddcee3c54db270e40cbac3423e742"
+          $candidates = @(
+            "4.9.0.20240103",
+            "4.8.0.20230708",
+            "4.7.0.20230115",
+            "4.6.0.20221208",
+            "4.10.0.20241024",
+            "4.5.5.4799"
+          )
+          $found = $false
+          foreach ($ver in $candidates) {
+            Write-Host "Trying OpenCvSharp4 $ver ..."
+            nuget install OpenCvSharp4 -Version $ver -OutputDirectory packages_ocv -NonInteractive 2>&1 | Out-Null
+            $dll = Get-ChildItem packages_ocv -Filter "OpenCvSharp.dll" -Recurse |
+              Where-Object { $_.FullName -notmatch "ref[\\/]" } |
+              Select-Object -First 1
+            if ($dll) {
+              $hash = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLower()
+              Write-Host "  hash=$hash"
+              if ($hash -eq $targetHash) {
+                Write-Host "  -> Matched! Downloading runtime..."
+                nuget install OpenCvSharp4.runtime.win -Version $ver `
+                  -OutputDirectory packages_ocv -NonInteractive
+                $extern = Get-ChildItem packages_ocv -Filter "OpenCvSharpExtern.dll" -Recurse |
+                  Select-Object -First 1
+                if ($extern) {
+                  Copy-Item $extern.FullName "bin\Release\OpenCvSharpExtern.dll" -Force
+                  Write-Host "OpenCvSharpExtern.dll ($ver) copied to bin\Release\"
+                  $found = $true
+                  break
+                }
+              }
+            }
+          }
+          if (-not $found) {
+            Write-Error "OpenCvSharp のバージョンが特定できませんでした。libs/OpenCvSharpExtern.dll を手動で追加してください。"
+            exit 1
+          }
+
       # ── Upload artifact ────────────────────────────────────────────
       - name: Upload Switch_macro.exe
         uses: actions/upload-artifact@v4
         with:
           name: Switch_macro-${{ github.sha }}
-          path: |
-            bin/Release/Switch_macro.exe
-            libs/
+          path: bin/Release/
           retention-days: 30
 
       # ── Create release on tag push ─────────────────────────────────
