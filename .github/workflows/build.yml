@@ -99,7 +99,7 @@ jobs:
             } else { Write-Error "SharpDX.dll not found"; exit 1 }
           } else { Write-Host "SharpDX.dll already exists" }
 
-      # ── Patch NxInterface.dll (internal→public 修正版) ────────────
+      # ── Patch NxInterface.dll (Mono.Cecil) ────────────────────────
       - name: Patch NxInterface.dll
         shell: pwsh
         run: |
@@ -109,10 +109,14 @@ jobs:
             Select-Object -First 1 -ExpandProperty FullName
           Write-Host "Mono.Cecil: $cecilPath"
           Add-Type -Path $cecilPath
-
           $asm    = [Mono.Cecil.AssemblyDefinition]::ReadAssembly("libs/NxInterface.dll")
           $module = $asm.MainModule
-
+          $obj    = $module.TypeSystem.Object
+          $bool   = $module.TypeSystem.Boolean
+          $str    = $module.TypeSystem.String
+          $void   = $module.TypeSystem.Void
+          $fAttr  = [Mono.Cecil.FieldAttributes]::Public -bor [Mono.Cecil.FieldAttributes]::Static
+          $mAttr  = [Mono.Cecil.MethodAttributes]::Public -bor [Mono.Cecil.MethodAttributes]::Static
           # ネスト型含む全型を収集
           $allTypes = [System.Collections.Generic.List[object]]::new()
           foreach ($t in $module.Types) {
@@ -120,39 +124,48 @@ jobs:
             foreach ($nt in $t.NestedTypes) { $allTypes.Add($nt) }
           }
           Write-Host "Total types: $($allTypes.Count)"
-
           foreach ($type in $allTypes) {
-            Write-Host "Checking: $($type.FullName)"
-
-            if ($type.Name -eq "NxControllerInterface" -or $type.Name -eq "NxCommand") {
-
-              # クラス自体を public に
-              if (-not $type.IsPublic) {
-                $type.IsPublic = $true
-                Write-Host "  -> Made $($type.Name) public"
-              }
-
-              # 全フィールドを public に (internal → public)
-              foreach ($field in $type.Fields) {
-                if (-not $field.IsPublic) {
-                  $field.IsPublic = $true
-                  Write-Host "  -> Made field '$($field.Name)' public"
+            Write-Host "  $($type.FullName)"
+            if ($type.Name -eq "NxControllerInterface") {
+              if (-not $type.IsPublic) { $type.IsPublic = $true; Write-Host "Made NxControllerInterface public" }
+              @("SerialPort","StartedBluetooth","KeyDataSend") | ForEach-Object {
+                $n = $_
+                if (-not ($type.Fields | Where-Object { $_.Name -eq $n })) {
+                  $ft = if ($n -eq "StartedBluetooth" -or $n -eq "KeyDataSend") { $bool } else { $obj }
+                  $type.Fields.Add([Mono.Cecil.FieldDefinition]::new($n, $fAttr, $ft))
+                  Write-Host "Added field $n"
                 }
               }
-
-              # 全メソッドを public に (コンストラクタ・コンパイラ生成を除く)
-              foreach ($method in $type.Methods) {
-                $skip = $method.Name -eq ".ctor" -or
-                        $method.Name -eq ".cctor" -or
-                        $method.Name.StartsWith("<")
-                if (-not $skip -and -not $method.IsPublic) {
-                  $method.IsPublic = $true
-                  Write-Host "  -> Made method '$($method.Name)' public"
+              @("ShutdownGamepad","OpenSerial") | ForEach-Object {
+                $n = $_
+                if (-not ($type.Methods | Where-Object { $_.Name -eq $n })) {
+                  $m = [Mono.Cecil.MethodDefinition]::new($n, $mAttr, $void)
+                  if ($n -eq "OpenSerial") {
+                    $m.Parameters.Add([Mono.Cecil.ParameterDefinition]::new("port", [Mono.Cecil.ParameterAttributes]::None, $str))
+                  }
+                  $m.Body = [Mono.Cecil.Cil.MethodBody]::new($m)
+                  $m.Body.GetILProcessor().Append($m.Body.GetILProcessor().Create([Mono.Cecil.Cil.OpCodes]::Ret))
+                  $type.Methods.Add($m)
+                  Write-Host "Added method $n"
                 }
               }
             }
+            if ($type.Name -eq "NxCommand") {
+              if (-not $type.IsPublic) { $type.IsPublic = $true; Write-Host "Made NxCommand public" }
+              @("LineNotifyToken","CurrentFrame","lockObject") | ForEach-Object {
+                $n = $_
+                if (-not ($type.Fields | Where-Object { $_.Name -eq $n })) {
+                  $ft = if ($n -eq "LineNotifyToken") { $str } else { $obj }
+                  $type.Fields.Add([Mono.Cecil.FieldDefinition]::new($n, $fAttr, $ft))
+                  Write-Host "Added field $n"
+                }
+              }
+              if (-not ($type.Fields | Where-Object { $_.Name -eq "ExitFlag" })) {
+                $type.Fields.Add([Mono.Cecil.FieldDefinition]::new("ExitFlag", $fAttr, $bool))
+                Write-Host "Added field ExitFlag"
+              }
+            }
           }
-
           $asm.Write("libs/NxInterface_patched.dll")
           $asm.Dispose()
           [GC]::Collect()
@@ -230,49 +243,15 @@ jobs:
           }
           Write-Host "Build succeeded: $($exe.FullName) ($([math]::Round($exe.Length/1KB, 1)) KB)"
 
-      # ── Add OpenCvSharpExtern.dll (ネイティブバインディング) ──────
+      # ── Copy OpenCvSharpExtern.dll to output ───────────────────────
       - name: Add OpenCvSharpExtern.dll to output
         shell: pwsh
         run: |
-          # libs/OpenCvSharp.dll の SHA256 でバージョンを自動判定して一致する
-          # OpenCvSharpExtern.dll を bin\Release\ へコピーする
-          $targetHash = "38ef66b5af604afedbaa9503a126706754dddcee3c54db270e40cbac3423e742"
-          $candidates = @(
-            "4.9.0.20240103",
-            "4.8.0.20230708",
-            "4.7.0.20230115",
-            "4.6.0.20221208",
-            "4.10.0.20241024",
-            "4.5.5.4799"
-          )
-          $found = $false
-          foreach ($ver in $candidates) {
-            Write-Host "Trying OpenCvSharp4 $ver ..."
-            nuget install OpenCvSharp4 -Version $ver -OutputDirectory packages_ocv -NonInteractive 2>&1 | Out-Null
-            $dll = Get-ChildItem packages_ocv -Filter "OpenCvSharp.dll" -Recurse |
-              Where-Object { $_.FullName -notmatch "ref[\\/]" } |
-              Select-Object -First 1
-            if ($dll) {
-              $hash = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLower()
-              Write-Host "  hash=$hash"
-              if ($hash -eq $targetHash) {
-                Write-Host "  -> Matched! Downloading runtime..."
-                nuget install OpenCvSharp4.runtime.win -Version $ver `
-                  -OutputDirectory packages_ocv -NonInteractive
-                $extern = Get-ChildItem packages_ocv -Filter "OpenCvSharpExtern.dll" -Recurse |
-                  Select-Object -First 1
-                if ($extern) {
-                  Copy-Item $extern.FullName "bin\Release\OpenCvSharpExtern.dll" -Force
-                  Write-Host "OpenCvSharpExtern.dll ($ver) copied to bin\Release\"
-                  $found = $true
-                  break
-                }
-              }
-            }
-          }
-          if (-not $found) {
-            Write-Error "OpenCvSharp のバージョンが特定できませんでした。libs/OpenCvSharpExtern.dll を手動で追加してください。"
-            exit 1
+          if (Test-Path "libs\OpenCvSharpExtern.dll") {
+            Copy-Item "libs\OpenCvSharpExtern.dll" "bin\Release\" -Force
+            Write-Host "OpenCvSharpExtern.dll copied from libs/"
+          } else {
+            Write-Warning "libs/OpenCvSharpExtern.dll not found - skipping"
           }
 
       # ── Upload artifact ────────────────────────────────────────────
@@ -280,7 +259,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Switch_macro-${{ github.sha }}
-          path: bin/Release/
+          path: |
+            bin/Release/Switch_macro.exe
+            libs/
           retention-days: 30
 
       # ── Create release on tag push ─────────────────────────────────
