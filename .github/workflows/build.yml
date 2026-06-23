@@ -99,7 +99,7 @@ jobs:
             } else { Write-Error "SharpDX.dll not found"; exit 1 }
           } else { Write-Host "SharpDX.dll already exists" }
 
-      # ── Patch NxInterface.dll (Mono.Cecil) ────────────────────────
+      # ── Patch NxInterface.dll (internal→public 修正版) ────────────
       - name: Patch NxInterface.dll
         shell: pwsh
         run: |
@@ -109,14 +109,10 @@ jobs:
             Select-Object -First 1 -ExpandProperty FullName
           Write-Host "Mono.Cecil: $cecilPath"
           Add-Type -Path $cecilPath
+
           $asm    = [Mono.Cecil.AssemblyDefinition]::ReadAssembly("libs/NxInterface.dll")
           $module = $asm.MainModule
-          $obj    = $module.TypeSystem.Object
-          $bool   = $module.TypeSystem.Boolean
-          $str    = $module.TypeSystem.String
-          $void   = $module.TypeSystem.Void
-          $fAttr  = [Mono.Cecil.FieldAttributes]::Public -bor [Mono.Cecil.FieldAttributes]::Static
-          $mAttr  = [Mono.Cecil.MethodAttributes]::Public -bor [Mono.Cecil.MethodAttributes]::Static
+
           # ネスト型含む全型を収集
           $allTypes = [System.Collections.Generic.List[object]]::new()
           foreach ($t in $module.Types) {
@@ -124,48 +120,39 @@ jobs:
             foreach ($nt in $t.NestedTypes) { $allTypes.Add($nt) }
           }
           Write-Host "Total types: $($allTypes.Count)"
+
           foreach ($type in $allTypes) {
-            Write-Host "  $($type.FullName)"
-            if ($type.Name -eq "NxControllerInterface") {
-              if (-not $type.IsPublic) { $type.IsPublic = $true; Write-Host "Made NxControllerInterface public" }
-              @("SerialPort","StartedBluetooth","KeyDataSend") | ForEach-Object {
-                $n = $_
-                if (-not ($type.Fields | Where-Object { $_.Name -eq $n })) {
-                  $ft = if ($n -eq "StartedBluetooth" -or $n -eq "KeyDataSend") { $bool } else { $obj }
-                  $type.Fields.Add([Mono.Cecil.FieldDefinition]::new($n, $fAttr, $ft))
-                  Write-Host "Added field $n"
+            Write-Host "Checking: $($type.FullName)"
+
+            if ($type.Name -eq "NxControllerInterface" -or $type.Name -eq "NxCommand") {
+
+              # クラス自体を public に
+              if (-not $type.IsPublic) {
+                $type.IsPublic = $true
+                Write-Host "  -> Made $($type.Name) public"
+              }
+
+              # 全フィールドを public に (internal → public)
+              foreach ($field in $type.Fields) {
+                if (-not $field.IsPublic) {
+                  $field.IsPublic = $true
+                  Write-Host "  -> Made field '$($field.Name)' public"
                 }
               }
-              @("ShutdownGamepad","OpenSerial") | ForEach-Object {
-                $n = $_
-                if (-not ($type.Methods | Where-Object { $_.Name -eq $n })) {
-                  $m = [Mono.Cecil.MethodDefinition]::new($n, $mAttr, $void)
-                  if ($n -eq "OpenSerial") {
-                    $m.Parameters.Add([Mono.Cecil.ParameterDefinition]::new("port", [Mono.Cecil.ParameterAttributes]::None, $str))
-                  }
-                  $m.Body = [Mono.Cecil.Cil.MethodBody]::new($m)
-                  $m.Body.GetILProcessor().Append($m.Body.GetILProcessor().Create([Mono.Cecil.Cil.OpCodes]::Ret))
-                  $type.Methods.Add($m)
-                  Write-Host "Added method $n"
+
+              # 全メソッドを public に (コンストラクタ・コンパイラ生成を除く)
+              foreach ($method in $type.Methods) {
+                $skip = $method.Name -eq ".ctor" -or
+                        $method.Name -eq ".cctor" -or
+                        $method.Name.StartsWith("<")
+                if (-not $skip -and -not $method.IsPublic) {
+                  $method.IsPublic = $true
+                  Write-Host "  -> Made method '$($method.Name)' public"
                 }
-              }
-            }
-            if ($type.Name -eq "NxCommand") {
-              if (-not $type.IsPublic) { $type.IsPublic = $true; Write-Host "Made NxCommand public" }
-              @("LineNotifyToken","CurrentFrame","lockObject") | ForEach-Object {
-                $n = $_
-                if (-not ($type.Fields | Where-Object { $_.Name -eq $n })) {
-                  $ft = if ($n -eq "LineNotifyToken") { $str } else { $obj }
-                  $type.Fields.Add([Mono.Cecil.FieldDefinition]::new($n, $fAttr, $ft))
-                  Write-Host "Added field $n"
-                }
-              }
-              if (-not ($type.Fields | Where-Object { $_.Name -eq "ExitFlag" })) {
-                $type.Fields.Add([Mono.Cecil.FieldDefinition]::new("ExitFlag", $fAttr, $bool))
-                Write-Host "Added field ExitFlag"
               }
             }
           }
+
           $asm.Write("libs/NxInterface_patched.dll")
           $asm.Dispose()
           [GC]::Collect()
