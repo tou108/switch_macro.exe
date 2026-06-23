@@ -84,6 +84,15 @@ jobs:
             Write-Host "Microsoft.Dynamic.dll copied to libs/"
           }
 
+      # ── Fix LangVersion (CS1617対策) ──────────────────────────────
+      - name: Fix LangVersion in csproj
+        shell: pwsh
+        run: |
+          $content = Get-Content Switch_macro.csproj -Raw
+          $content = $content -replace '<LangVersion>[^<]+</LangVersion>', '<LangVersion>preview</LangVersion>'
+          Set-Content Switch_macro.csproj $content -Encoding UTF8
+          Write-Host "LangVersion -> preview"
+
       # ── Restore & Build ────────────────────────────────────────────
       - name: Restore NuGet packages
         run: nuget restore Switch_macro.csproj
