@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       # ── .NET Framework 4.8 is pre-installed on windows-latest ──────
       - name: Setup MSBuild
@@ -58,6 +60,29 @@ jobs:
             exit 1
           }
           Write-Host "All required DLLs found."
+
+      # ── Download IronPython DLL ────────────────────────────────────
+      - name: Download IronPython DLL
+        shell: pwsh
+        run: |
+          nuget install IronPython -Version 2.7.12 -OutputDirectory packages -NonInteractive
+          $ironPython = Get-ChildItem -Path packages -Filter "IronPython.dll" -Recurse |
+            Where-Object { $_.FullName -match "net45" } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if ($ironPython) {
+            Copy-Item $ironPython "libs\IronPython.dll" -Force
+            Write-Host "IronPython.dll copied to libs/"
+          } else {
+            Write-Error "IronPython.dll not found in NuGet package"
+            exit 1
+          }
+          $dynamic = Get-ChildItem -Path packages -Filter "Microsoft.Dynamic.dll" -Recurse |
+            Where-Object { $_.FullName -match "net45" } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if ($dynamic -and -not (Test-Path "libs\Microsoft.Dynamic.dll")) {
+            Copy-Item $dynamic "libs\Microsoft.Dynamic.dll" -Force
+            Write-Host "Microsoft.Dynamic.dll copied to libs/"
+          }
 
       # ── Restore & Build ────────────────────────────────────────────
       - name: Restore NuGet packages
