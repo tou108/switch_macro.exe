@@ -99,14 +99,7 @@ jobs:
         run: |
           $content = Get-Content Switch_macro.csproj -Raw
           if ($content -notmatch 'PresentationFramework') {
-            $wpfRefs = @"
-  <ItemGroup>
-    <Reference Include="PresentationFramework" />
-    <Reference Include="PresentationCore" />
-    <Reference Include="WindowsBase" />
-    <Reference Include="System.Xaml" />
-  </ItemGroup>
-"@
+            $wpfRefs = '<ItemGroup><Reference Include="PresentationFramework" /><Reference Include="PresentationCore" /><Reference Include="WindowsBase" /><Reference Include="System.Xaml" /></ItemGroup>'
             $content = $content -replace '</Project>', "$wpfRefs`n</Project>"
             Set-Content Switch_macro.csproj $content -Encoding UTF8
             Write-Host "WPF references added"
