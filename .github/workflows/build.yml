@@ -85,7 +85,7 @@ jobs:
           }
 
       # ── Patch NxInterface.dll (Mono.Cecil) ────────────────────────
-      # NxControllerInterface を internal→public に変更
+      # NxControllerInterface を public に + 不足メンバーをスタブ追加
       # NxCommand.LineNotifyToken フィールドを追加
       - name: Patch NxInterface.dll
         shell: pwsh
@@ -98,22 +98,53 @@ jobs:
           Add-Type -Path $cecilPath
           $asm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly("libs/NxInterface.dll")
           $module = $asm.MainModule
+          $obj   = $module.TypeSystem.Object
+          $bool  = $module.TypeSystem.Boolean
+          $str   = $module.TypeSystem.String
+          $void  = $module.TypeSystem.Void
+          $fAttr = [Mono.Cecil.FieldAttributes]::Public -bor [Mono.Cecil.FieldAttributes]::Static
+          $mAttr = [Mono.Cecil.MethodAttributes]::Public -bor [Mono.Cecil.MethodAttributes]::Static
           foreach ($type in $module.Types) {
-            if ($type.Name -in @("NxControllerInterface","NxCommand")) {
-              if (-not $type.IsPublic) {
-                $type.IsPublic = $true
-                Write-Host "Made $($type.Name) public"
+            if ($type.Name -eq "NxControllerInterface") {
+              if (-not $type.IsPublic) { $type.IsPublic = $true; Write-Host "Made NxControllerInterface public" }
+              # SerialPort (object型でスタブ)
+              if (-not ($type.Fields | Where-Object Name -eq "SerialPort")) {
+                $type.Fields.Add([Mono.Cecil.FieldDefinition]::new("SerialPort", $fAttr, $obj))
+                Write-Host "Added SerialPort"
+              }
+              # StartedBluetooth
+              if (-not ($type.Fields | Where-Object Name -eq "StartedBluetooth")) {
+                $type.Fields.Add([Mono.Cecil.FieldDefinition]::new("StartedBluetooth", $fAttr, $bool))
+                Write-Host "Added StartedBluetooth"
+              }
+              # ShutdownGamepad()
+              if (-not ($type.Methods | Where-Object Name -eq "ShutdownGamepad")) {
+                $m = [Mono.Cecil.MethodDefinition]::new("ShutdownGamepad", $mAttr, $void)
+                $m.Body = [Mono.Cecil.Cil.MethodBody]::new($m)
+                $il = $m.Body.GetILProcessor()
+                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+                $type.Methods.Add($m)
+                Write-Host "Added ShutdownGamepad()"
+              }
+              # OpenSerial(string)
+              if (-not ($type.Methods | Where-Object Name -eq "OpenSerial")) {
+                $m = [Mono.Cecil.MethodDefinition]::new("OpenSerial", $mAttr, $void)
+                $m.Parameters.Add([Mono.Cecil.ParameterDefinition]::new("portName", [Mono.Cecil.ParameterAttributes]::None, $str))
+                $m.Body = [Mono.Cecil.Cil.MethodBody]::new($m)
+                $il = $m.Body.GetILProcessor()
+                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+                $type.Methods.Add($m)
+                Write-Host "Added OpenSerial(string)"
               }
             }
-          }
-          $nxCmd = $module.Types | Where-Object { $_.Name -eq "NxCommand" }
-          if ($nxCmd -and -not ($nxCmd.Fields | Where-Object { $_.Name -eq "LineNotifyToken" })) {
-            $field = New-Object Mono.Cecil.FieldDefinition(
-              "LineNotifyToken",
-              ([Mono.Cecil.FieldAttributes]::Public -bor [Mono.Cecil.FieldAttributes]::Static),
-              $module.TypeSystem.String)
-            $nxCmd.Fields.Add($field)
-            Write-Host "Added LineNotifyToken to NxCommand"
+            if ($type.Name -eq "NxCommand") {
+              if (-not $type.IsPublic) { $type.IsPublic = $true; Write-Host "Made NxCommand public" }
+              # LineNotifyToken
+              if (-not ($type.Fields | Where-Object Name -eq "LineNotifyToken")) {
+                $type.Fields.Add([Mono.Cecil.FieldDefinition]::new("LineNotifyToken", $fAttr, $str))
+                Write-Host "Added LineNotifyToken"
+              }
+            }
           }
           $asm.Write("libs/NxInterface_patched.dll")
           $asm.Dispose()
