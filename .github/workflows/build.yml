@@ -93,6 +93,27 @@ jobs:
           Set-Content Switch_macro.csproj $content -Encoding UTF8
           Write-Host "LangVersion -> preview"
 
+      # ── Add WPF references (CS0234対策) ───────────────────────────
+      - name: Add WPF references to csproj
+        shell: pwsh
+        run: |
+          $content = Get-Content Switch_macro.csproj -Raw
+          if ($content -notmatch 'PresentationFramework') {
+            $wpfRefs = @"
+  <ItemGroup>
+    <Reference Include="PresentationFramework" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Xaml" />
+  </ItemGroup>
+"@
+            $content = $content -replace '</Project>', "$wpfRefs`n</Project>"
+            Set-Content Switch_macro.csproj $content -Encoding UTF8
+            Write-Host "WPF references added"
+          } else {
+            Write-Host "PresentationFramework already referenced"
+          }
+
       # ── Restore & Build ────────────────────────────────────────────
       - name: Restore NuGet packages
         run: nuget restore Switch_macro.csproj
