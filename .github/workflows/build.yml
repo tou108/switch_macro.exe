@@ -1,1 +1,102 @@
+name: Build Switch_macro
 
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── .NET Framework 4.8 is pre-installed on windows-latest ──────
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      # ── Verify required DLLs exist in libs/ ────────────────────────
+      - name: Check required DLLs
+        shell: pwsh
+        run: |
+          $required = @(
+            "ICSharpCode.AvalonEdit.dll",
+            "BZComponent.dll",
+            "DirectShowLib-2005.dll",
+            "Vortice.XInput.dll",
+            "SharpDX.DirectInput.dll",
+            "DiscordRPC.dll",
+            "RJCP.SerialPortStream.dll",
+            "OpenCvSharp.dll",
+            "Microsoft.CodeAnalysis.Scripting.dll",
+            "Newtonsoft.Json.dll",
+            "NxInterface.dll",
+            "Suites.Utils.dll",
+            "PSTaskDialog.dll",
+            "Microsoft.CodeAnalysis.dll",
+            "Microsoft.CodeAnalysis.CSharp.Scripting.dll",
+            "UrlBase64.dll",
+            "OpenCvSharp.Extensions.dll",
+            "Microsoft.Scripting.dll"
+          )
+          $missing = @()
+          foreach ($dll in $required) {
+            if (-not (Test-Path "libs\$dll")) {
+              $missing += $dll
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "Missing required DLLs in libs/:`n$($missing -join "`n")"
+            Write-Host "Please copy all DLLs from your NX Macro Controller installation into the libs/ folder."
+            exit 1
+          }
+          Write-Host "All required DLLs found."
+
+      # ── Restore & Build ────────────────────────────────────────────
+      - name: Restore NuGet packages
+        run: nuget restore Switch_macro.csproj
+
+      - name: Build Release (x64)
+        run: |
+          msbuild Switch_macro.csproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:OutputPath=bin\Release\ `
+            /m
+
+      # ── Rename output exe ──────────────────────────────────────────
+      - name: Verify output exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path bin\Release -Filter "Switch_macro.exe" -Recurse | Select-Object -First 1
+          if ($null -eq $exe) {
+            Write-Error "Switch_macro.exe not found in bin\Release\"
+            exit 1
+          }
+          Write-Host "Build succeeded: $($exe.FullName) ($([math]::Round($exe.Length/1KB, 1)) KB)"
+
+      # ── Upload artifact ────────────────────────────────────────────
+      - name: Upload Switch_macro.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: Switch_macro-${{ github.sha }}
+          path: |
+            bin/Release/Switch_macro.exe
+            libs/
+          retention-days: 30
+
+      # ── Create release on tag push ─────────────────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bin/Release/Switch_macro.exe
+          generate_release_notes: true
