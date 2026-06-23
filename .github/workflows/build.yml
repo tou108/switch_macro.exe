@@ -84,33 +84,63 @@ jobs:
             Write-Host "Microsoft.Dynamic.dll copied to libs/"
           }
 
-      # ── Patch NxInterface.dll ─────────────────────────────────────
+      # ── Patch NxInterface.dll (Mono.Cecil) ────────────────────────
       # NxControllerInterface を internal→public に変更
       # NxCommand.LineNotifyToken フィールドを追加
       - name: Patch NxInterface.dll
         shell: pwsh
         run: |
-          $ildasm = Get-ChildItem "C:\Program Files (x86)\Microsoft SDKs" -Filter "ildasm.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -Last 1 -ExpandProperty FullName
-          $ilasm  = Get-ChildItem "C:\Windows\Microsoft.NET" -Filter "ilasm.exe" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "64" } | Select-Object -First 1 -ExpandProperty FullName
-          Write-Host "ildasm: $ildasm"
-          Write-Host "ilasm : $ilasm"
-          & $ildasm "libs\NxInterface.dll" /out:NxInterface.il /nobar
-          if (-not (Test-Path NxInterface.il)) { Write-Error "Disassembly failed"; exit 1 }
-          $il = Get-Content NxInterface.il -Raw -Encoding UTF8
-          # WinRT extern参照を除去（ilasm非対応）
-          $il = [regex]::Replace($il, '\.assembly extern windowsruntime \S+\s*\{[^}]*\}', '', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-          # NxControllerInterface を public に
-          $il = $il -replace '(\.class\s+)private(\s+auto\s+ansi\s+.*?NxControllerInterface)', '$1public$2'
-          # NxCommand を public に
-          $il = $il -replace '(\.class\s+)private(\s+auto\s+ansi\s+.*?\bNxCommand\b)', '$1public$2'
-          # LineNotifyToken フィールドを追加
-          if ($il -notmatch 'LineNotifyToken') {
-            $il = $il -replace '(} // end of class NxCommand)', "  .field public static string LineNotifyToken`n  `$1"
+          nuget install Mono.Cecil -Version 0.11.5 -OutputDirectory packages -NonInteractive
+          $cecilPath = Get-ChildItem packages -Filter "Mono.Cecil.dll" -Recurse |
+            Where-Object { $_.FullName -notmatch "runtimes|contentFiles" } |
+            Select-Object -First 1 -ExpandProperty FullName
+          Write-Host "Mono.Cecil: $cecilPath"
+          Add-Type -Path $cecilPath
+          $asm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly("libs/NxInterface.dll")
+          $module = $asm.MainModule
+          foreach ($type in $module.Types) {
+            if ($type.Name -in @("NxControllerInterface","NxCommand")) {
+              if (-not $type.IsPublic) {
+                $type.IsPublic = $true
+                Write-Host "Made $($type.Name) public"
+              }
+            }
+          }
+          $nxCmd = $module.Types | Where-Object { $_.Name -eq "NxCommand" }
+          if ($nxCmd -and -not ($nxCmd.Fields | Where-Object { $_.Name -eq "LineNotifyToken" })) {
+            $field = New-Object Mono.Cecil.FieldDefinition(
+              "LineNotifyToken",
+              ([Mono.Cecil.FieldAttributes]::Public -bor [Mono.Cecil.FieldAttributes]::Static),
+              $module.TypeSystem.String)
+            $nxCmd.Fields.Add($field)
             Write-Host "Added LineNotifyToken to NxCommand"
           }
-          Set-Content NxInterface.il $il -Encoding UTF8
-          & $ilasm "NxInterface.il" /dll /output:"libs\NxInterface.dll" /nologo
+          $asm.Write("libs/NxInterface_patched.dll")
+          Move-Item "libs/NxInterface_patched.dll" "libs/NxInterface.dll" -Force
           Write-Host "NxInterface.dll patched"
+
+      # ── System.Index/Range polyfill (CS0518対策) ──────────────────
+      - name: Add System.Index polyfill
+        shell: pwsh
+        run: |
+          $p  = "namespace System {`n"
+          $p += "  internal readonly struct Index {`n"
+          $p += "    private readonly int _v;`n"
+          $p += "    public Index(int v, bool fromEnd=false){_v=fromEnd?~v:v;}`n"
+          $p += "    public static implicit operator Index(int v)=>new Index(v);`n"
+          $p += "    public int GetOffset(int len)=>_v<0?len+_v+1:_v;`n"
+          $p += "    public bool IsFromEnd=>_v<0;`n"
+          $p += "    public int Value=>_v<0?~_v:_v;`n"
+          $p += "  }`n"
+          $p += "  internal readonly struct Range {`n"
+          $p += "    public Index Start{get;}`n"
+          $p += "    public Index End{get;}`n"
+          $p += "    public Range(Index s,Index e){Start=s;End=e;}`n"
+          $p += "    public static Range All=>new Range(new Index(0),new Index(~0));`n"
+          $p += "  }`n"
+          $p += "}`n"
+          Set-Content "SystemIndexPolyfill.cs" $p -Encoding UTF8
+          Write-Host "System.Index polyfill created"
 
       # ── Fix LangVersion (CS1617対策) ──────────────────────────────
       - name: Fix LangVersion in csproj
