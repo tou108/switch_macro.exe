@@ -84,9 +84,22 @@ jobs:
             Write-Host "Microsoft.Dynamic.dll copied to libs/"
           }
 
+      # ── Download SharpDX core DLL (CS0012対策) ────────────────────
+      - name: Download SharpDX core DLL
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "libs\SharpDX.dll")) {
+            nuget install SharpDX -Version 4.2.0 -OutputDirectory packages -NonInteractive
+            $dll = Get-ChildItem packages -Filter "SharpDX.dll" -Recurse |
+              Where-Object { $_.FullName -match "net45|net40|lib" } |
+              Select-Object -First 1 -ExpandProperty FullName
+            if ($dll) {
+              Copy-Item $dll "libs\SharpDX.dll" -Force
+              Write-Host "SharpDX.dll copied to libs/"
+            } else { Write-Error "SharpDX.dll not found"; exit 1 }
+          } else { Write-Host "SharpDX.dll already exists" }
+
       # ── Patch NxInterface.dll (Mono.Cecil) ────────────────────────
-      # NxControllerInterface を public に + 不足メンバーをスタブ追加
-      # NxCommand.LineNotifyToken フィールドを追加
       - name: Patch NxInterface.dll
         shell: pwsh
         run: |
@@ -96,63 +109,70 @@ jobs:
             Select-Object -First 1 -ExpandProperty FullName
           Write-Host "Mono.Cecil: $cecilPath"
           Add-Type -Path $cecilPath
-          $asm = [Mono.Cecil.AssemblyDefinition]::ReadAssembly("libs/NxInterface.dll")
+          $asm    = [Mono.Cecil.AssemblyDefinition]::ReadAssembly("libs/NxInterface.dll")
           $module = $asm.MainModule
-          $obj   = $module.TypeSystem.Object
-          $bool  = $module.TypeSystem.Boolean
-          $str   = $module.TypeSystem.String
-          $void  = $module.TypeSystem.Void
-          $fAttr = [Mono.Cecil.FieldAttributes]::Public -bor [Mono.Cecil.FieldAttributes]::Static
-          $mAttr = [Mono.Cecil.MethodAttributes]::Public -bor [Mono.Cecil.MethodAttributes]::Static
-          foreach ($type in $module.Types) {
+          $obj    = $module.TypeSystem.Object
+          $bool   = $module.TypeSystem.Boolean
+          $str    = $module.TypeSystem.String
+          $void   = $module.TypeSystem.Void
+          $fAttr  = [Mono.Cecil.FieldAttributes]::Public -bor [Mono.Cecil.FieldAttributes]::Static
+          $mAttr  = [Mono.Cecil.MethodAttributes]::Public -bor [Mono.Cecil.MethodAttributes]::Static
+          # ネスト型含む全型を収集
+          $allTypes = [System.Collections.Generic.List[object]]::new()
+          foreach ($t in $module.Types) {
+            $allTypes.Add($t)
+            foreach ($nt in $t.NestedTypes) { $allTypes.Add($nt) }
+          }
+          Write-Host "Total types: $($allTypes.Count)"
+          foreach ($type in $allTypes) {
+            Write-Host "  $($type.FullName)"
             if ($type.Name -eq "NxControllerInterface") {
               if (-not $type.IsPublic) { $type.IsPublic = $true; Write-Host "Made NxControllerInterface public" }
-              # SerialPort (object型でスタブ)
-              if (-not ($type.Fields | Where-Object Name -eq "SerialPort")) {
-                $type.Fields.Add([Mono.Cecil.FieldDefinition]::new("SerialPort", $fAttr, $obj))
-                Write-Host "Added SerialPort"
+              @("SerialPort","StartedBluetooth","KeyDataSend") | ForEach-Object {
+                $n = $_
+                if (-not ($type.Fields | Where-Object { $_.Name -eq $n })) {
+                  $ft = if ($n -eq "StartedBluetooth" -or $n -eq "KeyDataSend") { $bool } else { $obj }
+                  $type.Fields.Add([Mono.Cecil.FieldDefinition]::new($n, $fAttr, $ft))
+                  Write-Host "Added field $n"
+                }
               }
-              # StartedBluetooth
-              if (-not ($type.Fields | Where-Object Name -eq "StartedBluetooth")) {
-                $type.Fields.Add([Mono.Cecil.FieldDefinition]::new("StartedBluetooth", $fAttr, $bool))
-                Write-Host "Added StartedBluetooth"
-              }
-              # ShutdownGamepad()
-              if (-not ($type.Methods | Where-Object Name -eq "ShutdownGamepad")) {
-                $m = [Mono.Cecil.MethodDefinition]::new("ShutdownGamepad", $mAttr, $void)
-                $m.Body = [Mono.Cecil.Cil.MethodBody]::new($m)
-                $il = $m.Body.GetILProcessor()
-                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ret))
-                $type.Methods.Add($m)
-                Write-Host "Added ShutdownGamepad()"
-              }
-              # OpenSerial(string)
-              if (-not ($type.Methods | Where-Object Name -eq "OpenSerial")) {
-                $m = [Mono.Cecil.MethodDefinition]::new("OpenSerial", $mAttr, $void)
-                $m.Parameters.Add([Mono.Cecil.ParameterDefinition]::new("portName", [Mono.Cecil.ParameterAttributes]::None, $str))
-                $m.Body = [Mono.Cecil.Cil.MethodBody]::new($m)
-                $il = $m.Body.GetILProcessor()
-                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ret))
-                $type.Methods.Add($m)
-                Write-Host "Added OpenSerial(string)"
+              @("ShutdownGamepad","OpenSerial") | ForEach-Object {
+                $n = $_
+                if (-not ($type.Methods | Where-Object { $_.Name -eq $n })) {
+                  $m = [Mono.Cecil.MethodDefinition]::new($n, $mAttr, $void)
+                  if ($n -eq "OpenSerial") {
+                    $m.Parameters.Add([Mono.Cecil.ParameterDefinition]::new("port", [Mono.Cecil.ParameterAttributes]::None, $str))
+                  }
+                  $m.Body = [Mono.Cecil.Cil.MethodBody]::new($m)
+                  $m.Body.GetILProcessor().Append($m.Body.GetILProcessor().Create([Mono.Cecil.Cil.OpCodes]::Ret))
+                  $type.Methods.Add($m)
+                  Write-Host "Added method $n"
+                }
               }
             }
             if ($type.Name -eq "NxCommand") {
               if (-not $type.IsPublic) { $type.IsPublic = $true; Write-Host "Made NxCommand public" }
-              # LineNotifyToken
-              if (-not ($type.Fields | Where-Object Name -eq "LineNotifyToken")) {
-                $type.Fields.Add([Mono.Cecil.FieldDefinition]::new("LineNotifyToken", $fAttr, $str))
-                Write-Host "Added LineNotifyToken"
+              @("LineNotifyToken","CurrentFrame","lockObject") | ForEach-Object {
+                $n = $_
+                if (-not ($type.Fields | Where-Object { $_.Name -eq $n })) {
+                  $ft = if ($n -eq "LineNotifyToken") { $str } else { $obj }
+                  $type.Fields.Add([Mono.Cecil.FieldDefinition]::new($n, $fAttr, $ft))
+                  Write-Host "Added field $n"
+                }
+              }
+              if (-not ($type.Fields | Where-Object { $_.Name -eq "ExitFlag" })) {
+                $type.Fields.Add([Mono.Cecil.FieldDefinition]::new("ExitFlag", $fAttr, $bool))
+                Write-Host "Added field ExitFlag"
               }
             }
           }
           $asm.Write("libs/NxInterface_patched.dll")
           $asm.Dispose()
           [GC]::Collect()
-          Start-Sleep -Milliseconds 200
+          Start-Sleep -Milliseconds 300
           Remove-Item "libs/NxInterface.dll" -Force
           Move-Item "libs/NxInterface_patched.dll" "libs/NxInterface.dll"
-          Write-Host "NxInterface.dll patched"
+          Write-Host "NxInterface.dll patched successfully"
 
       # ── System.Index/Range polyfill (CS0518対策) ──────────────────
       - name: Add System.Index polyfill
